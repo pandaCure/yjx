@@ -1,0 +1,24 @@
+{
+  "name": "mock-website",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "a": "tsc --init"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bluebird": "^3.7.2",
+    "chalk": "^5.3.0",
+    "glob": "^10.3.12",
+    "html-to-text": "^9.0.5",
+    "puppeteer": "^22.6.3"
+  },
+  "devDependencies": {
+    "@types/bluebird": "^3.5.42",
+    "@types/html-to-text": "^9.0.4",
+    "typescript": "^5.4.5"
+  }
+}

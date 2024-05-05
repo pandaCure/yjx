@@ -1,0 +1,10 @@
+Please review the code below to detect security defects. If any are found, please describe the security defect in detail and indicate the corresponding line number of code and solution. If none are found, please state '''No security defects are detected in the code'''.
+
+1 {
+2     "event_type":"instance.lock.start",
+3     "payload":{
+4         "$ref": "common_payloads/InstanceActionPayload.json#"
+5     },
+6     "priority":"INFO",
+7     "publisher_id":"nova-api:host"
+8 }

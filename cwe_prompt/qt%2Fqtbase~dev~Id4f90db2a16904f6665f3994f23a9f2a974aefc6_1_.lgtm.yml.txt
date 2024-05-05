@@ -1,0 +1,35 @@
+Please review the code below for security defects using the CWE (Common Weakness Enumeration) as a reference standard. If any are found, please describe the security defect in detail and indicate the corresponding line number of code and solution. If none are detected, state: 'No security defects are detected in the code'.
+
+1 extraction:
+2   cpp:
+3     prepare:
+4       packages:
+5         - libgl-dev
+6         - libglu-dev
+7         - libpcre2-dev
+8         - libz-dev
+9         - libfreetype6-dev
+10         - libpng-dev
+11         - libjpeg-dev
+12         - libsqlite3-dev
+13     after_prepare:
+14       - mkdir $HOME/cmake-3.17 \
+15           \ && wget -qO- "https://cmake.org/files/v3.17/cmake-3.17.3-Linux-x86_64.tar.gz" \
+16             \ | tar -xzf - --strip-components=1 -C $HOME/cmake-3.17
+17       - export PATH=$HOME/cmake-3.17/bin:$PATH
+18 
+19     # Pre-analysis step.
+20     configure:
+21       command:
+22         - "./configure -cmake -opensource -confirm-license -debug -no-pch \
+23           \ -nomake tests -nomake examples -no-harfbuzz \
+24           \ -system-pcre -system-zlib -system-freetype -system-libpng \
+25           \ -system-libjpeg -system-sqlite"
+26         # We skip analyzing the bootstrap library, since the same code is
+27         # built with non-standard flags and false-positives are flagged.
+28         - ninja bootstrap_tools
+29 
+30     # Actual analysis.
+31     index:
+32       build_command:
+33         - ninja

@@ -1,0 +1,195 @@
+Please review the code below to detect security defects. If any are found, please describe the security defect in detail and indicate the corresponding line number of code and solution. If none are found, please state '''No security defects are detected in the code'''.
+
+1 ==========================================
+2 Secure live migration with QEMU-native TLS
+3 ==========================================
+4 
+5 Context
+6 ~~~~~~~
+7 
+8 The encryption offerred by Nova's ``[libvirt]/live_migration_tunnelled``
+9 does not secure all the different migration streams of a Nova instance,
+10 namely: guest RAM, device state, and disks (via NBD) when using
+11 non-shared storage.  Further, the "tunnelling via libvirtd" has inherent
+12 limitations: (a) it cannot handle live migration of disks in a
+13 non-shared storage setup (a.k.a. "block migration"); and (b) has a huge
+14 performance overhead and latency, because it burns more CPU and memory
+15 bandwidth due to increased number of data copies on both source and
+16 destination hosts.
+17 
+18 To solve this existing limitation, QEMU and libvirt has recently gained
+19 (refer below for version details) support for "native TLS"—i.e. TLS
+20 built into QEMU).  This will secure all data transports, including disks
+21 that are not on shared storage—all of this without incurring the
+22 limitations of the "tunnelled via libvirtd" transport.
+23 
+24 To take advantage of the "native TLS" support in QEMU and libvirt, Nova
+25 has introduced new configuration attribute
+26 ``[libvirt]/live_migration_with_native_tls``.
+27 
+28 .. _`Prerequisites`:
+29 
+30 Prerequisites
+31 ~~~~~~~~~~~~~
+32 
+33 (1) Version requirement: This feature needs at least: libvirt 4.4.0 and
+34     QEMU 2.11.
+35 
+36 (2) A pre-configured TLS environment—i.e. CA, server, and client
+37     certificates, their file permissions, et al—must be "correctly"
+38     configured (typically by an installer tool) on all relevant Compute
+39     nodes.  To simplify your PKI (Public Key Infrastructure) setup, use
+40     deployment tools that takes care of handling all the certificate
+41     lifecycle management.  E.g. refer to the: "`TLS everywhere
+42     <https://docs.openstack.org/tripleo-docs/latest/install/advanced_deployment/tls_everywhere.html>`__"
+43     guide from the TripleO project.
+44 
+45 (3) Password-less SSH setup for all relevant Compute nodes.
+46 
+47 (4) On all relevant Compute nodes, ensure the following TLS-related
+48     config attributes in ``/etc/libvirt/qemu.conf/`` are in place::
+49 
+50       default_tls_x509_cert_dir = "/etc/pki/qemu/"
+51       default_tls_x509_verify = 1
+52 
+53     Refer to the "`Additional information`_" section further below on a
+54     note about the other TLS-related configuration attributes in
+55     ``/etc/libvirt/qemu.conf/``.
+56 
+57 Validating your TLS environment on Compute nodes
+58 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+59 
+60 Assuming you have two Compute hosts — ComputeNode1, and ComputeNode2 —
+61 run the `virt-pki-validate` tool (comes with the 'libvirt-client'
+62 package on your Linux distribution) on both the nodes to ensure all the
+63 necessary PKI files are configured are configured::
+64 
+65     [ComputeNode1]$ virt-pki-validate
+66     Found /usr/bin/certtool
+67     Found CA certificate /etc/pki/CA/cacert.pem for TLS Migration Test
+68     Found client certificate /etc/pki/libvirt/clientcert.pem for ComputeNode1
+69     Found client private key /etc/pki/libvirt/private/clientkey.pem
+70     Found server certificate /etc/pki/libvirt/servercert.pem for ComputeNode1
+71     Found server private key /etc/pki/libvirt/private/serverkey.pem
+72     Make sure /etc/sysconfig/libvirtd is setup to listen to
+73     TCP/IP connections and restart the libvirtd service
+74 
+75     [ComputeNode2]$ virt-pki-validate
+76     Found /usr/bin/certtool
+77     Found CA certificate /etc/pki/CA/cacert.pem for TLS Migration Test
+78     Found client certificate /etc/pki/libvirt/clientcert.pem for ComputeNode2
+79     Found client private key /etc/pki/libvirt/private/clientkey.pem
+80     Found server certificate /etc/pki/libvirt/servercert.pem for ComputeNode2
+81     Found server private key /etc/pki/libvirt/private/serverkey.pem
+82     Make sure /etc/sysconfig/libvirtd is setup to listen to
+83     TCP/IP connections and restart the libvirtd service
+84 
+85 
+86 Other TLS environemnt related checks on Compute nodes
+87 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+88 
+89 (1) On *both*, ComputeNode1, and ComputeNode2, update 'x509' config
+90     options in ``/etc/libvirt/qemu.conf/``::
+91 
+92         default_tls_x509_cert_dir = "/etc/pki/qemu"
+93         default_tls_x509_verify = 1
+94 
+95       And modify /etc/sysconfig/libvirtd on both (ComputeNode1 &
+96       ComputeNode2)::
+97 
+98         LIBVIRTD_ARGS="--listen"
+99 
+100       And restart libvirt daemon (also on both nodes)::
+101 
+102         $ systemctl restart libvirtd
+103 
+104 (2) **IMPORTANT**: Ensure that the  permissions of certificate files
+105     and keys in ``/etc/pki/qemu/*`` directory on both source *and*
+106     destination Compute nodes to be the following::
+107 
+108         [root@ComputeNode1 ~]$ ls -lasrtZ /etc/pki/qemu
+109         total 32
+110         0 drwxr-xr-x. 10 root root system_u:object_r:cert_t:s0      110 Dec 10 10:39 ..
+111         4 -rw-r--r--.  1 qemu qemu unconfined_u:object_r:cert_t:s0 1464 Dec 10 11:08 ca-cert.pem
+112         4 -r-----r--.  1 qemu qemu unconfined_u:object_r:cert_t:s0 1558 Dec 10 11:08 server-cert.pem
+113         4 -r-----r--.  1 qemu qemu unconfined_u:object_r:cert_t:s0 1619 Dec 10 11:09 client-cert.pem
+114         8 -rw-------.  1 qemu qemu unconfined_u:object_r:cert_t:s0 8180 Dec 10 11:09 client-key.pem
+115         4 -rw-------.  1 qemu qemu unconfined_u:object_r:cert_t:s0 2459 Dec 11 05:32 server-key-stripped.pem
+116         8 -rw----r--.  1 qemu qemu unconfined_u:object_r:cert_t:s0 8177 Dec 11 05:35 server-key.pem
+117         0 drwxr-xr-x.  2 root root unconfined_u:object_r:cert_t:s0  146 Dec 11 06:01 .
+118 
+119         [root@ComputeNode2 ~]# ls -lasrtZ /etc/pki/qemu/
+120         total 28
+121         0 drwxr-xr-x. 10 root root system_u:object_r:cert_t:s0      110 Dec 10 10:39 ..
+122         4 -rw-r--r--.  1 qemu qemu unconfined_u:object_r:cert_t:s0 1464 Dec 10 11:10 ca-cert.pem
+123         4 -r--r--r--.  1 qemu qemu unconfined_u:object_r:cert_t:s0 1558 Dec 10 11:10 server-cert.pem
+124         8 -rw-------.  1 qemu qemu unconfined_u:object_r:cert_t:s0 8170 Dec 10 11:10 server-key.pem
+125         4 -r-----r--.  1 qemu qemu unconfined_u:object_r:cert_t:s0 1619 Dec 10 11:10 client-cert.pem
+126         8 -rw-r--r--.  1 qemu qemu unconfined_u:object_r:cert_t:s0 8180 Dec 10 11:10 client-key.pem
+127         0 drwxr-xr-x.  2 root root unconfined_u:object_r:cert_t:s0  115 Dec 10 11:10 .
+128 
+129 
+130 Test
+131 ~~~~
+132 
+133 (1) On all relevant Compute nodes, ensure to enable the
+134     ``live_migration_with_native_tls`` configuration attribute (and
+135     restart the libvirt daemon)::
+136 
+137        [libvirt]
+138        live_migration_with_native_tls = true
+139 
+140    ..note::
+141       Setting both ``live_migration_tunnelled`` *and*
+142       ``live_migration_with_native_tls`` at the same time is invalid
+143       (and disallowed).
+144 
+145 (2) Migrate guests with and without  shared storage from ComputeNode1 to
+146     ComputeNode2 *with* TLS.  Refer to the :doc:`live-migration-usage`
+147     document on details on live migration.
+148 
+149 
+150 .. _`Additional information`:
+151 
+152 Additional information
+153 ----------------------
+154 
+155 - If you have the relevant libvirt and QEMU versions (mentioned in the
+156   "`Prerequisites`_" section earlier), then using the
+157   ``live_migration_with_native_tls`` is strongly recommended over the
+158   more limited ``live_migration_tunnelled`` option—which is intended to
+159   be deprecated in future.
+160 
+161 - There are in total *nine* TLS-related config options in
+162   ``a/etc/libvirt/qemu.conf``::
+163 
+164       default_tls_x509_cert_dir
+165       default_tls_x509_verify
+166       nbd_tls
+167       nbd_tls_x509_cert_dir
+168       migrate_tls_x509_cert_dir
+169 
+170       vnc_tls_x509_cert_dir
+171       spice_tls_x509_cert_dir
+172       vxhs_tls_x509_cert_dir
+173       chardev_tls_x509_cert_dir
+174 
+175   If you set both ``default_tls_x509_cert_dir`` and
+176   ``default_tls_x509_verify`` parameters for all certificates, then no
+177   need to specify any of the other ``*_tls*`` config options.
+178 
+179   The intention (of libvirt) is that you can just use the
+180   ``default_tls_x509_*`` config attributes—that way you don't need to
+181   set any other ``*_tls*`` parameters, _unless_ you need different
+182   certificates for some services.  The rationale for that is that some
+183   services (e.g.  migration / NBD)  are only exposed to internal
+184   infrastructure; while some sevices (VNC, Spice) might be exposed
+185   publically, so might need different certificates.  For OpenStack this
+186   doesn't matter, though, we'll stick with the defaults.
+187 
+188 - Sometimes you may need to stop ``firewalld`` on both ComputeNode1 and
+189   ComputeNode2 (otherwise you get: ``error: internal error: unable to
+190   execute QEMU command 'drive-mirror': Failed to connect socket: No
+191   route to host``)::
+192 
+193     $ systemctl stop firewalld

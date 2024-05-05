@@ -1,0 +1,191 @@
+Please review the code below to detect security defects. If any are found, please describe the security defect in detail and indicate the corresponding line number of code and solution. If none are found, please state '''No security defects are detected in the code'''.
+
+1 Neutron Gate Failure Triage
+2 ===========================
+3 
+4 This page provides guidelines for spotting and assessing neutron gate failures. Some hints for triaging
+5 failures are also provided.
+6 
+7 Spotting Gate Failures
+8 ----------------------
+9 This can be achieved using several tools:
+10 
+11 * `Grafana dashboard <http://grafana.openstack.org/dashboard/db/neutron-failure-rate>`_
+12 * `logstash <http://logstash.openstack.org/>`_
+13 
+14 For checking gate failures with logstash the following query will return failures for a specific job:
+15 
+16 > build_status:FAILURE AND message:Finished  AND build_name:"check-tempest-dsvm-neutron" AND build_queue:"gate"
+17 
+18 And divided by the total number of jobs executed:
+19 
+20 > message:Finished  AND build_name:"check-tempest-dsvm-neutron" AND build_queue:"gate"
+21 
+22 It will return the failure rate in the selected period for a given job. It is important to remark that
+23 failures in the check queue might be misleading as the problem causing the failure is most of the time in
+24 the patch being checked. Therefore it is always advisable to work on failures occurred in the gate queue.
+25 However, these failures are a precious resource for assessing frequency and determining root cause of
+26 failures which manifest in the gate queue.
+27 
+28 The step above will provide a quick outlook of where things stand. When the failure rate raises above 10% for
+29 a job in 24 hours, it's time to be on alert. 25% is amber alert. 33% is red alert. Anything above 50% means
+30 that probably somebody from the infra team has already a contract out on you. Whether you are relaxed, in
+31 alert mode, or freaking out because you see a red dot on your chest, it is always a good idea to check on
+32 daily bases the elastic-recheck pages.
+33 
+34 Under the `gate pipeline <http://status.openstack.org/elastic-recheck/gate.html>`_ tab, you can see gate
+35 failure rates for already known bugs. The bugs in this page are ordered by decreasing failure rates (for the
+36 past 24 hours). If one of the bugs affecting Neutron is among those on top of that list, you should check
+37 that the corresponding bug is already assigned and somebody is working on it. If not, and there is not a good
+38 reason for that, it should be ensured somebody gets a crack at it as soon as possible. The other part of the
+39 story is to check for `uncategorized <http://status.openstack.org/elastic-recheck/data/uncategorized.html>`_
+40 failures. This is where failures for new (unknown) gate breaking bugs end up; on the other hand also infra
+41 error causing job failures end up here. It should be duty of the diligent Neutron developer to ensure the
+42 classification rate for neutron jobs is as close as possible to 100%. To this aim, the diligent Neutron
+43 developer should adopt the procedure outlined in the following sections.
+44 
+45 .. _troubleshooting-tempest-jobs:
+46 
+47 Troubleshooting Tempest jobs
+48 ----------------------------
+49 1. Open logs for failed jobs and look for logs/testr_results.html.gz.
+50 2. If that file is missing, check console.html and see where the job failed.
+51     1. If there is a failure in devstack-gate-cleanup-host.txt it's likely to be an infra issue.
+52     2. If the failure is in devstacklog.txt it could a devstack, neutron, or infra issue.
+53 3. However, most of the time the failure is in one of the tempest tests. Take note of the error message and go to
+54    logstash.
+55 4. On logstash, search for occurrences of this error message, and try to identify the root cause for the failure
+56    (see below).
+57 5. File a bug for this failure, and push an :ref:`Elastic Recheck Query <elastic-recheck-query>` for it.
+58 6. If you are confident with the area of this bug, and you have time, assign it to yourself; otherwise look for an
+59     assignee or talk to the Neutron's bug czar to find an assignee.
+60 
+61 Troubleshooting functional/fullstack job
+62 ----------------------------------------
+63 1. Go to the job link provided by Jenkins CI.
+64 2. Look at logs/testr_results.html.gz for which particular test failed.
+65 3. More logs from a particular test are stored at
+66    logs/dsvm-functional-logs/<path_of_the_test> (or dsvm-fullstack-logs
+67    for fullstack job).
+68 4. Find the error in the logs and search for similar errors in existing
+69    launchpad bugs. If no bugs were reported, create a new bug report. Don't
+70    forget to put a snippet of the trace into the new launchpad bug. If the
+71    log file for a particular job doesn't contain any trace, pick the one
+72    from testr_results.html.gz.
+73 5. Create an :ref:`Elastic Recheck Query <elastic-recheck-query>`
+74 
+75 Advanced troubleshooting gate jobs
+76 ----------------------------------
+77 Sometimes when tempest/functiona/fullstack job is failing often, it might be
+78 hard to reproduce it in local environments and it might be also very hard to
+79 understand the reason of such failures only from reading logs of failed job.
+80 In such case there are some additional possiblilities to debug test directly
+81 on test node.
+82 To understand exactly what happens during such failing test on test node it
+83 might be necessary to access directly to node and debug ``live`` what
+84 happens there during  test.
+85 
+86 This can be done in two ways:
+87 
+88 1. Using `remote_pdb <https://pypi.python.org/pypi/remote-pdb>`_ python
+89    module and access, using ``telnet`` directly to python debugger in failed
+90    test.
+91 
+92    To achieve that, You need to send to gerrit ``Do not merge`` patch with
+93    changes as below:
+94 
+95    * add iptables rule to accept incomming telnet connection to remote_pdb. This
+96      can be done e.g. in ``neutron/tests/contrib/post_test_hook.sh`` file, in
+97      proper section according to test which You want to debug::
+98 
+99         sudo iptables -I openstack-INPUT -p tcp -m state --state NEW -m tcp -j ACCEPT
+100 
+101    * increase ``OS_TEST_TIMEOUT`` to make test stay longer with remote_pdb
+102      active and make debugging easier.
+103      This change can be also done in ``neutron/tests/contrib/post_test_hook.sh``
+104      file, in same section as above adding of iptables rule::
+105 
+106         export OS_TEST_TIMEOUT=999999
+107 
+108    * to make easier finding IP address of test node, You can also add to
+109      ``/neutron/tests/contrib/post_test_hook.sh`` script check of IPs configured
+110      on test node, for example::
+111 
+112         hostname -I
+113 
+114     It can be added in same section as described above OS_TEST_TIMEOUT change
+115     and iptables change.
+116 
+117    * add package ``remote_pdb`` to ``test-requirements.txt`` file. Then it will
+118      be automatically installed in test's venv before tests will start::
+119 
+120          cat test-requirements.txt
+121          remote_pdb
+122 
+123    * finally, You need to import and call remote_pdb module in place of
+124      Your code or test where You want to start debugger::
+125 
+126         diff --git a/neutron/tests/fullstack/test_connectivity.py b/neutron/tests/fullstack/test_connectivity.py
+127         index c8650b0..260207b 100644
+128         --- a/neutron/tests/fullstack/test_connectivity.py
+129         +++ b/neutron/tests/fullstack/test_connectivity.py
+130         @@ -189,6 +189,11 @@ class
+131         TestLinuxBridgeConnectivitySameNetwork(BaseConnectivitySameNetworkTest):
+132                 ]
+133 
+134              def test_connectivity(self):
+135         +        from urllib import urlopen
+136         +        from json import load
+137         +        my_ip = load(urlopen('https://api.ipify.org/?format=json'))['ip']
+138         +        import remote_pdb; remote_pdb.set_trace(my_ip)
+139         +
+140         self._test_connectivity()
+141 
+142      Please not that discovery of public IP address is necessary because by
+143      default remote_pdb will bind only to ``127.0.0.1`` IP address.
+144      You can do it in any way. Above is just example of one of possible methods.
+145 
+146    Now, when You have all those changes done, You can commit it and go to `Zuul
+147    status page <https://zuul.openstack.org>`_ to find status of tests for Your
+148    ``DNM`` patch, then open console log from Your job and wait there until
+149    ``remote_pdb`` will be started.
+150    You need to find in this console log IP address of test node also. This is
+151    necessary to connect via ``telnet`` and start debugging. It should be
+152    something like::
+153 
+154         RemotePdb session open at 172.99.68.50:34536, waiting for connection ...
+155 
+156    Example of such DNM patch described above can be seen on
+157    `<https://review.openstack.org/#/c/558259/>`_.
+158 
+159    Please note, that after adding some new packages to requirements file,
+160    ``requirements-check`` job for Your test patch will fail but it's not
+161    important for futher debugging.
+162 
+163 2. If root access to test node is necessary, for example to check if VMs are
+164    really spawned, router/dhcp namespaces are really configured properly and
+165    so on, You can ask members of infra-team to hold off troubleshooted job.
+166    You can ask for that on ``openstack-infra`` on IRC.
+167    In such case infra-team will add Your SSH key to test node and if job will
+168    fails, node will not be destroyed. You will be able to SSH to it and debug
+169    what You need.
+170    Please remember to tell on ``openstack-infra`` channel when You will finish
+171    Your debug, that they will be able to unlock and destroy this hold node.
+172 
+173    Above two solutions can be used together. Than You might be able to connect
+174    to test node with both methods:
+175    * using ``remote_pdb`` to connect via ``telnet``,
+176    * using ``SSH`` to connect as a root to test node.
+177    You can then ask infra-team to add You key to specific node on which You have
+178    already started remote_pdb session also.
+179 
+180 Root Causing a Gate Failure
+181 ---------------------------
+182 Time-based identification, i.e. find the naughty patch by log scavenging.
+183 
+184 .. _elastic-recheck-query:
+185 
+186 Filing An Elastic Recheck Query
+187 -------------------------------
+188 The `elastic recheck <http://status.openstack.org/elastic-recheck/>`_ page has all the current open ER queries.
+189 To file one, please see the `ER Wiki <https://wiki.openstack.org/wiki/ElasticRecheck>`_.

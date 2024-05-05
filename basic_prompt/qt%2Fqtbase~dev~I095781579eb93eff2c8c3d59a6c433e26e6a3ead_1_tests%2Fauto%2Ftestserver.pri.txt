@@ -1,0 +1,148 @@
+Please review the code below to detect security defects. If any are found, please describe the security defect in detail and indicate the corresponding line number of code and solution. If none are found, please state '''No security defects are detected in the code'''.
+
+1 # Integrating docker-based test servers into Qt Test framework
+2 #
+3 # This file adds support for docker-based test servers built by testcase
+4 # projects that need them. To enable this feature, any automated test can
+5 # include testserver.pri in its project file. This instructs qmake to insert
+6 # additional targets into the generated Makefile. The 'check' target then brings
+7 # up test servers before running the testcase, and shuts them down afterwards.
+8 #
+9 # TESTSERVER_COMPOSE_FILE
+10 # - Contains the path of docker-compose file
+11 # This configuration file defines the services used for autotests. It tells the
+12 # docker engine how to build up the docker images and containers. In qtbase, a
+13 # shared docker-compose file is located in the tests folder.
+14 # Example: TESTSERVER_COMPOSE_FILE = \
+15 #              $$dirname(_QMAKE_CONF_)/tests/testserver/docker-compose.yml
+16 #
+17 # The user must run the provisioning scripts in advance before attempting to
+18 # build the test servers. The docker_testserver.sh script is used to build up
+19 # the docker images into the docker-cache. It handles the immutable parts of the
+20 # server installation that rarely need adjustment, such as downloading packages.
+21 # Example: qt5/coin/provisioning/.../testserver/docker_testserver.sh
+22 #
+23 # QT_TEST_SERVER_LIST
+24 # - A list of test servers to bring up for this testcase
+25 # These test servers should be defined in $$TESTSERVER_COMPOSE_FILE. Each
+26 # testcase can define the test servers it depends on.
+27 # Example: QT_TEST_SERVER_LIST = apache2 squid vsftpd ftp-proxy danted
+28 #
+29 # Pre-processor defines needed for the application:
+30 # QT_TEST_SERVER
+31 # - A preprocessor macro used for testcase to change testing parameters at
+32 #   compile time
+33 # This macro is predefined for docker-based test servers and is passed as a
+34 # compiler option (-DQT_TEST_SERVER). The testcase can then check whether
+35 # docker-based servers are in use and change the testing parameters, such as
+36 # host name or port number, at compile time. An example can be found in
+37 # network-settings.h.
+38 #
+39 # Example:
+40 # #if defined(QT_TEST_SERVER)
+41 #     Change the testing parameters at compile time
+42 # #endif
+43 #
+44 # QT_TEST_SERVER_DOMAIN
+45 # - A preprocessor macro that holds the server domain name
+46 # Provided for the helper functions in network-settings.h. Use function
+47 # serverDomainName() in your application instead.
+48 #
+49 # Additional make targets:
+50 # 1. check_network - A renamed target from the check target of testcase feature.
+51 # 2. testserver_clean - Clean up server containers/images and tidy away related
+52 #    files.
+53 
+54 TESTSERVER_VERSION = $$system(docker-compose --version)
+55 
+56 equals(QMAKE_HOST.os, Darwin)|equals(QMAKE_HOST.os, Windows)|isEmpty(TESTSERVER_VERSION) {
+57     # Make check with server "qt-test-server.qt-test-net" as a fallback
+58     message("testserver: qt-test-server.qt-test-net")
+59 } else:equals(QMAKE_HOST.os, Linux) {
+60     # Disable Docker-based test server and use "qt-test-server.qt-test-net" server as a fallback
+61     message("testserver: qt-test-server.qt-test-net")
+62 } else {
+63     # Make check with test servers
+64     equals(QMAKE_HOST.os, Darwin) {
+65         # There is no docker bridge on macOS. It is impossible to ping a container.
+66         # Docker docs recommends using port mapping to connect to a container;
+67         # but it causes a port conflict if the user is running a service that
+68         # binds the same port on the host. An alternative solution is to deploy
+69         # the docker environment into VirtualBox using docker-machine.
+70         TESTSERVER_COMPOSE_FILE = \
+71             $$dirname(_QMAKE_CONF_)/tests/testserver/docker-compose-for-macOS.yml
+72 
+73         # The connection configuration for the target machine
+74         MACHINE_CONFIG = $(shell docker-machine config qt-test-server)
+75 
+76         # The environment variables passed to the docker-compose file
+77         TEST_ENV = 'MACHINE_IP=$(shell docker-machine ip qt-test-server)'
+78     } else {
+79         TESTSERVER_COMPOSE_FILE = $$dirname(_QMAKE_CONF_)/tests/testserver/docker-compose.yml
+80         DEFINES += QT_TEST_SERVER_NAME
+81     }
+82 
+83     # Ensure that the docker-compose file is provided. It is a configuration
+84     # file which is mandatory for all docker-compose commands. You can get more
+85     # detail from the description of TESTSERVER_COMPOSE_FILE above. There is
+86     # also an example showing how to configure it manually.
+87     FILE_PRETEST_MSG = "Project variable 'TESTSERVER_COMPOSE_FILE' is not set"
+88     testserver_pretest.commands = $(info "testserver:" $$TESTSERVER_VERSION)
+89     testserver_pretest.commands += $(if $$TESTSERVER_COMPOSE_FILE,,$(error $$FILE_PRETEST_MSG))
+90 
+91     # Make sure docker-machine is both created and running. The docker_machine
+92     # script is used to deploy the docker environment into VirtualBox.
+93     # Example: qt5/coin/provisioning/common/shared/testserver/docker_machine.sh
+94     !isEmpty(MACHINE_CONFIG) {
+95         MACHINE_DEPENDENT_CMD = sysctl machdep.cpu.features
+96         MACHINE_DEPENDENT_MSG = "VMX not found error! Please make sure VT-X/AMD-v has been enabled."
+97         testserver_pretest.commands += \
+98             $(if $(shell $$MACHINE_DEPENDENT_CMD | grep "VMX"),,$(error $$MACHINE_DEPENDENT_MSG))
+99 
+100         MACHINE_LIST_CMD = docker-machine ls -q --filter "Name=^qt-test-server$"
+101         MACHINE_LIST_MSG = "Docker machine qt-test-server not found"
+102         testserver_pretest.commands += \
+103             $(if $(shell $$MACHINE_LIST_CMD),,$(error $$MACHINE_LIST_MSG))
+104 
+105         MACHINE_STATE_CMD = \
+106             docker-machine ls -q --filter "State=Running" --filter "Name=^qt-test-server$"
+107         MACHINE_START_CMD = docker-machine start qt-test-server
+108         testserver_pretest.commands += \
+109             $(if $(shell $$MACHINE_STATE_CMD),,$(shell $$MACHINE_START_CMD > /dev/null))
+110     }
+111 
+112     # Before starting the test servers, it requires the user to run the setup
+113     # script (coin/provisioning/.../testserver/docker_testserver.sh) in advance.
+114     IMAGE_PRETEST_CMD = docker $$MACHINE_CONFIG images -aq "qt-test-server-*"
+115     IMAGE_PRETEST_MSG = "Docker image qt-test-server-* not found"
+116     testserver_pretest.commands += $(if $(shell $$IMAGE_PRETEST_CMD),,$(error $$IMAGE_PRETEST_MSG))
+117 
+118     # The domain name is relevant to https keycert (qnetworkreply/crts/qt-test-net-cacert.pem).
+119     DNSDOMAIN = test-net.qt.local
+120     DEFINES += QT_TEST_SERVER QT_TEST_SERVER_DOMAIN=$$shell_quote(\"$${DNSDOMAIN}\")
+121 
+122     # Rename the check target of testcase feature
+123     check.target = check_network
+124     testserver_test.target = check
+125 
+126     # Pretesting test servers environment
+127     testserver_test.depends = testserver_pretest
+128 
+129     # Bring up test servers and make sure the services are ready.
+130     !isEmpty(TEST_ENV): testserver_test.commands = env $$TEST_ENV
+131     testserver_test.commands += docker-compose $$MACHINE_CONFIG -f $$TESTSERVER_COMPOSE_FILE up \
+132                                 --detach --force-recreate --timeout 1 $${QT_TEST_SERVER_LIST} &&
+133 
+134     # Check test cases with docker-based test servers.
+135     testserver_test.commands += $(MAKE) check_network;
+136 
+137     # Stop and remove test servers after testing.
+138     testserver_test.commands += docker-compose $$MACHINE_CONFIG -f $$TESTSERVER_COMPOSE_FILE down \
+139                                 --timeout 1
+140 
+141     # Destroy test servers and tidy away related files.
+142     testserver_clean.commands = docker-compose $$MACHINE_CONFIG -f $$TESTSERVER_COMPOSE_FILE down \
+143                                 --rmi all
+144 
+145     QMAKE_EXTRA_TARGETS += testserver_pretest testserver_test testserver_clean
+146 }

@@ -1,0 +1,41 @@
+Please review the code below for security defects. You can consider defect types in terms of:
+1.CWE-284 (Improper Access Control)
+2.CWE-435 (Improper Interaction Between Multiple Entities)
+3.CWE-664 (Improper Control of a Resource Through its Lifetime)
+4.CWE-682 (Incorrect Calculation)
+5.CWE-691 (Insufficient Control Flow Management)
+6.CWE-693 (Protection Mechanism Failure)
+7.CWE-697 (Incorrect Comparison)
+8.CWE-703 (Improper Check or Handling of Exceptional Conditions)
+9.CWE-707 (Improper Neutralization)
+10.CWE-710 (Improper Adherence to Coding Standards)
+If any are found, please describe the security defect in detail and indicate the corresponding line number of code and solution. If none are detected, states: 'No security defects are detected in the code'.
+
+1 #!/bin/bash
+2 
+3 MAKE_RESOLV_CONF_FUNCTION=make_resolv_conf
+4 
+5 USAGE="$0 <path to virtual environment to place executable>
+6 The script takes existing dhclient-script and makes $MAKE_RESOLV_CONF_FUNCTION function a noop function.
+7 "
+8 
+9 if [ $# -lt 1 ]; then
+10     echo "Path to virtual environment directory is a required parameter."
+11     echo $USAGE
+12     exit 2
+13 fi
+14 
+15 VENV_DIR=$1
+16 DHCLIENT_SCRIPT_NAME=dhclient-script
+17 DHCLIENT_PATH=$(sudo which $DHCLIENT_SCRIPT_NAME)
+18 FULLSTACK_DHCLIENT_SCRIPT=$VENV_DIR/bin/fullstack-dhclient-script
+19 
+20 if [ -n "$DHCLIENT_PATH" ]; then
+21     # Return from make_resolv_conf function immediately. This will cause
+22     # that /etc/resolv.conf will not be updated by fake fullstack machines.
+23     sed "/^$MAKE_RESOLV_CONF_FUNCTION()/a\    return" $DHCLIENT_PATH > $FULLSTACK_DHCLIENT_SCRIPT
+24     chmod +x $FULLSTACK_DHCLIENT_SCRIPT
+25 else
+26     echo "$DHCLIENT_SCRIPT_NAME not found."
+27     exit 1
+28 fi

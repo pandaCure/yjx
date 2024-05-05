@@ -1,0 +1,413 @@
+Please review the code below to detect security defects. If any are found, please describe the security defect in detail and indicate the corresponding line number of code and solution. If none are found, please state '''No security defects are detected in the code'''.
+
+1 /****************************************************************************
+2 **
+3 ** Copyright (C) 2016 The Qt Company Ltd.
+4 ** Contact: https://www.qt.io/licensing/
+5 **
+6 ** This file is part of the plugins of the Qt Toolkit.
+7 **
+8 ** $QT_BEGIN_LICENSE:LGPL$
+9 ** Commercial License Usage
+10 ** Licensees holding valid commercial Qt licenses may use this file in
+11 ** accordance with the commercial license agreement provided with the
+12 ** Software or, alternatively, in accordance with the terms contained in
+13 ** a written agreement between you and The Qt Company. For licensing terms
+14 ** and conditions see https://www.qt.io/terms-conditions. For further
+15 ** information use the contact form at https://www.qt.io/contact-us.
+16 **
+17 ** GNU Lesser General Public License Usage
+18 ** Alternatively, this file may be used under the terms of the GNU Lesser
+19 ** General Public License version 3 as published by the Free Software
+20 ** Foundation and appearing in the file LICENSE.LGPL3 included in the
+21 ** packaging of this file. Please review the following information to
+22 ** ensure the GNU Lesser General Public License version 3 requirements
+23 ** will be met: https://www.gnu.org/licenses/lgpl-3.0.html.
+24 **
+25 ** GNU General Public License Usage
+26 ** Alternatively, this file may be used under the terms of the GNU
+27 ** General Public License version 2.0 or (at your option) the GNU General
+28 ** Public license version 3 or any later version approved by the KDE Free
+29 ** Qt Foundation. The licenses are as published by the Free Software
+30 ** Foundation and appearing in the file LICENSE.GPL2 and LICENSE.GPL3
+31 ** included in the packaging of this file. Please review the following
+32 ** information to ensure the GNU General Public License requirements will
+33 ** be met: https://www.gnu.org/licenses/gpl-2.0.html and
+34 ** https://www.gnu.org/licenses/gpl-3.0.html.
+35 **
+36 ** $QT_END_LICENSE$
+37 **
+38 ****************************************************************************/
+39 
+40 #include "qioswindow.h"
+41 
+42 #include "qiosapplicationdelegate.h"
+43 #include "qioscontext.h"
+44 #include "qiosglobal.h"
+45 #include "qiosintegration.h"
+46 #include "qiosscreen.h"
+47 #include "qiosviewcontroller.h"
+48 #include "quiview.h"
+49 #include "qiosinputcontext.h"
+50 
+51 #include <QtGui/private/qwindow_p.h>
+52 #include <qpa/qplatformintegration.h>
+53 
+54 #import <QuartzCore/CAEAGLLayer.h>
+55 #ifdef Q_OS_IOS
+56 #import <QuartzCore/CAMetalLayer.h>
+57 #endif
+58 
+59 #include <QtDebug>
+60 
+61 QT_BEGIN_NAMESPACE
+62 
+63 QIOSWindow::QIOSWindow(QWindow *window)
+64     : QPlatformWindow(window)
+65     , m_windowLevel(0)
+66 {
+67 #ifdef Q_OS_IOS
+68     if (window->surfaceType() == QSurface::MetalSurface)
+69         m_view = [[QUIMetalView alloc] initWithQIOSWindow:this];
+70     else
+71 #endif
+72         m_view = [[QUIView alloc] initWithQIOSWindow:this];
+73 
+74     connect(qGuiApp, &QGuiApplication::applicationStateChanged, this, &QIOSWindow::applicationStateChanged);
+75 
+76     setParent(QPlatformWindow::parent());
+77 
+78     // Resolve default window geometry in case it was not set before creating the
+79     // platform window. This picks up eg. minimum-size if set, and defaults to
+80     // the "maxmized" geometry (even though we're not in that window state).
+81     // FIXME: Detect if we apply a maximized geometry and send a window state
+82     // change event in that case.
+83     m_normalGeometry = initialGeometry(window, QPlatformWindow::geometry(),
+84         screen()->availableGeometry().width(), screen()->availableGeometry().height());
+85 
+86     setWindowState(window->windowStates());
+87     setOpacity(window->opacity());
+88 
+89     Qt::ScreenOrientation initialOrientation = window->contentOrientation();
+90     if (initialOrientation != Qt::PrimaryOrientation) {
+91         // Start up in portrait, then apply possible content orientation,
+92         // as per Apple's documentation.
+93         dispatch_async(dispatch_get_main_queue(), ^{
+94             handleContentOrientationChange(initialOrientation);
+95         });
+96     }
+97 }
+98 
+99 QIOSWindow::~QIOSWindow()
+100 {
+101     // According to the UIResponder documentation, Cocoa Touch should react to system interruptions
+102     // that "might cause the view to be removed from the window" by sending touchesCancelled, but in
+103     // practice this doesn't seem to happen when removing the view from its superview. To ensure that
+104     // Qt's internal state for touch and mouse handling is kept consistent, we therefor have to force
+105     // cancellation of all touch events.
+106     [m_view touchesCancelled:[NSSet set] withEvent:0];
+107 
+108     clearAccessibleCache();
+109     m_view.platformWindow = 0;
+110     [m_view removeFromSuperview];
+111     [m_view release];
+112 }
+113 
+114 
+115 QSurfaceFormat QIOSWindow::format() const
+116 {
+117     return window()->requestedFormat();
+118 }
+119 
+120 
+121 bool QIOSWindow::blockedByModal()
+122 {
+123     QWindow *modalWindow = QGuiApplication::modalWindow();
+124     return modalWindow && modalWindow != window();
+125 }
+126 
+127 void QIOSWindow::setVisible(bool visible)
+128 {
+129     m_view.hidden = !visible;
+130     [m_view setNeedsDisplay];
+131 
+132     if (!isQtApplication() || !window()->isTopLevel())
+133         return;
+134 
+135     // Since iOS doesn't do window management the way a Qt application
+136     // expects, we need to raise and activate windows ourselves:
+137     if (visible)
+138         updateWindowLevel();
+139 
+140     if (blockedByModal()) {
+141         if (visible)
+142             raise();
+143         return;
+144     }
+145 
+146     if (visible && shouldAutoActivateWindow()) {
+147         if (!window()->property("_q_showWithoutActivating").toBool())
+148             requestActivateWindow();
+149     } else if (!visible && [m_view isActiveWindow]) {
+150         // Our window was active/focus window but now hidden, so relinquish
+151         // focus to the next possible window in the stack.
+152         NSArray<UIView *> *subviews = m_view.viewController.view.subviews;
+153         for (int i = int(subviews.count) - 1; i >= 0; --i) {
+154             UIView *view = [subviews objectAtIndex:i];
+155             if (view.hidden)
+156                 continue;
+157 
+158             QWindow *w = view.qwindow;
+159             if (!w || !w->isTopLevel())
+160                 continue;
+161 
+162             QIOSWindow *iosWindow = static_cast<QIOSWindow *>(w->handle());
+163             if (!iosWindow->shouldAutoActivateWindow())
+164                 continue;
+165 
+166             iosWindow->requestActivateWindow();
+167             break;
+168         }
+169         if (int(subviews.count) == 1)
+170             static_cast<QIOSInputContext *>(QIOSIntegration::instance()->inputContext())->setFocusObject(nullptr);
+171     }
+172 }
+173 
+174 bool QIOSWindow::shouldAutoActivateWindow() const
+175 {
+176     if (![m_view canBecomeFirstResponder])
+177         return false;
+178 
+179     // We don't want to do automatic window activation for popup windows
+180     // that are unlikely to contain editable controls (to avoid hiding
+181     // the keyboard while the popup is showing)
+182     const Qt::WindowType type = window()->type();
+183     return (type != Qt::Popup && type != Qt::ToolTip) || !window()->isActive();
+184 }
+185 
+186 void QIOSWindow::setOpacity(qreal level)
+187 {
+188     m_view.alpha = qBound(0.0, level, 1.0);
+189 }
+190 
+191 void QIOSWindow::setGeometry(const QRect &rect)
+192 {
+193     m_normalGeometry = rect;
+194 
+195     if (window()->windowState() != Qt::WindowNoState) {
+196         QPlatformWindow::setGeometry(rect);
+197 
+198         // The layout will realize the requested geometry was not applied, and
+199         // send geometry-change events that match the actual geometry.
+200         [m_view setNeedsLayout];
+201 
+202         if (window()->inherits("QWidgetWindow")) {
+203             // QWidget wrongly assumes that setGeometry resets the window
+204             // state back to Qt::NoWindowState, so we need to inform it that
+205             // that his is not the case by re-issuing the current window state.
+206             QWindowSystemInterface::handleWindowStateChanged(window(), window()->windowState());
+207 
+208             // It also needs to be told immediately that the geometry it requested
+209             // did not apply, otherwise it will continue on as if it did, instead
+210             // of waiting for a resize event.
+211             [m_view layoutIfNeeded];
+212         }
+213 
+214         return;
+215     }
+216 
+217     applyGeometry(rect);
+218 }
+219 
+220 void QIOSWindow::applyGeometry(const QRect &rect)
+221 {
+222     // Geometry changes are asynchronous, but QWindow::geometry() is
+223     // expected to report back the 'requested geometry' until we get
+224     // a callback with the updated geometry from the window system.
+225     // The baseclass takes care of persisting this for us.
+226     QPlatformWindow::setGeometry(rect);
+227 
+228     m_view.frame = rect.toCGRect();
+229 
+230     // iOS will automatically trigger -[layoutSubviews:] for resize,
+231     // but not for move, so we force it just in case.
+232     [m_view setNeedsLayout];
+233 
+234     if (window()->inherits("QWidgetWindow"))
+235         [m_view layoutIfNeeded];
+236 }
+237 
+238 QMargins QIOSWindow::safeAreaMargins() const
+239 {
+240     UIEdgeInsets safeAreaInsets = m_view.qt_safeAreaInsets;
+241     return QMargins(safeAreaInsets.left, safeAreaInsets.top,
+242         safeAreaInsets.right, safeAreaInsets.bottom);
+243 }
+244 
+245 bool QIOSWindow::isExposed() const
+246 {
+247     return qApp->applicationState() != Qt::ApplicationSuspended
+248         && window()->isVisible() && !window()->geometry().isEmpty();
+249 }
+250 
+251 void QIOSWindow::setWindowState(Qt::WindowStates state)
+252 {
+253     // Update the QWindow representation straight away, so that
+254     // we can update the statusbar visibility based on the new
+255     // state before applying geometry changes.
+256     qt_window_private(window())->windowState = state;
+257 
+258     if (window()->isTopLevel() && window()->isVisible() && window()->isActive())
+259         [m_view.qtViewController updateProperties];
+260 
+261     if (state & Qt::WindowMinimized) {
+262         applyGeometry(QRect());
+263     } else if (state & (Qt::WindowFullScreen | Qt::WindowMaximized)) {
+264         // When an application is in split-view mode, the UIScreen still has the
+265         // same geometry, but the UIWindow is resized to the area reserved for the
+266         // application. We use this to constrain the geometry used when applying the
+267         // fullscreen or maximized window states. Note that we do not do this
+268         // in applyGeometry(), as we don't want to artificially limit window
+269         // placement "outside" of the screen bounds if that's what the user wants.
+270 
+271         QRect uiWindowBounds = QRectF::fromCGRect(m_view.window.bounds).toRect();
+272         QRect fullscreenGeometry = screen()->geometry().intersected(uiWindowBounds);
+273         QRect maximizedGeometry = window()->flags() & Qt::MaximizeUsingFullscreenGeometryHint ?
+274             fullscreenGeometry : screen()->availableGeometry().intersected(uiWindowBounds);
+275 
+276         if (state & Qt::WindowFullScreen)
+277             applyGeometry(fullscreenGeometry);
+278         else
+279             applyGeometry(maximizedGeometry);
+280     } else {
+281         applyGeometry(m_normalGeometry);
+282     }
+283 }
+284 
+285 void QIOSWindow::setParent(const QPlatformWindow *parentWindow)
+286 {
+287     UIView *parentView = parentWindow ? reinterpret_cast<UIView *>(parentWindow->winId())
+288         : isQtApplication() ? static_cast<QIOSScreen *>(screen())->uiWindow().rootViewController.view : 0;
+289 
+290     [parentView addSubview:m_view];
+291 }
+292 
+293 void QIOSWindow::requestActivateWindow()
+294 {
+295     // Note that several windows can be active at the same time if they exist in the same
+296     // hierarchy (transient children). But only one window can be QGuiApplication::focusWindow().
+297     // Dispite the name, 'requestActivateWindow' means raise and transfer focus to the window:
+298     if (blockedByModal())
+299         return;
+300 
+301     Q_ASSERT(m_view.window);
+302     [m_view.window makeKeyWindow];
+303     [m_view becomeFirstResponder];
+304 
+305     if (window()->isTopLevel())
+306         raise();
+307 }
+308 
+309 void QIOSWindow::raiseOrLower(bool raise)
+310 {
+311     // Re-insert m_view at the correct index among its sibling views
+312     // (QWindows) according to their current m_windowLevel:
+313     if (!isQtApplication())
+314         return;
+315 
+316     NSArray<UIView *> *subviews = m_view.superview.subviews;
+317     if (subviews.count == 1)
+318         return;
+319 
+320     for (int i = int(subviews.count) - 1; i >= 0; --i) {
+321         UIView *view = static_cast<UIView *>([subviews objectAtIndex:i]);
+322         if (view.hidden || view == m_view || !view.qwindow)
+323             continue;
+324         int level = static_cast<QIOSWindow *>(view.qwindow->handle())->m_windowLevel;
+325         if (m_windowLevel > level || (raise && m_windowLevel == level)) {
+326             [m_view.superview insertSubview:m_view aboveSubview:view];
+327             return;
+328         }
+329     }
+330     [m_view.superview insertSubview:m_view atIndex:0];
+331 }
+332 
+333 void QIOSWindow::updateWindowLevel()
+334 {
+335     Qt::WindowType type = window()->type();
+336 
+337     if (type == Qt::ToolTip)
+338         m_windowLevel = 120;
+339     else if (window()->flags() & Qt::WindowStaysOnTopHint)
+340         m_windowLevel = 100;
+341     else if (window()->isModal())
+342         m_windowLevel = 40;
+343     else if (type == Qt::Popup)
+344         m_windowLevel = 30;
+345     else if (type == Qt::SplashScreen)
+346         m_windowLevel = 20;
+347     else if (type == Qt::Tool)
+348         m_windowLevel = 10;
+349     else
+350         m_windowLevel = 0;
+351 
+352     // A window should be in at least the same m_windowLevel as its parent:
+353     QWindow *transientParent = window()->transientParent();
+354     QIOSWindow *transientParentWindow = transientParent ? static_cast<QIOSWindow *>(transientParent->handle()) : 0;
+355     if (transientParentWindow)
+356         m_windowLevel = qMax(transientParentWindow->m_windowLevel, m_windowLevel);
+357 }
+358 
+359 void QIOSWindow::handleContentOrientationChange(Qt::ScreenOrientation orientation)
+360 {
+361     // Update the QWindow representation straight away, so that
+362     // we can update the statusbar orientation based on the new
+363     // content orientation.
+364     qt_window_private(window())->contentOrientation = orientation;
+365 
+366     [m_view.qtViewController updateProperties];
+367 }
+368 
+369 void QIOSWindow::applicationStateChanged(Qt::ApplicationState)
+370 {
+371     if (window()->isExposed() != isExposed())
+372         [m_view sendUpdatedExposeEvent];
+373 }
+374 
+375 qreal QIOSWindow::devicePixelRatio() const
+376 {
+377     return m_view.contentScaleFactor;
+378 }
+379 
+380 void QIOSWindow::clearAccessibleCache()
+381 {
+382     [m_view clearAccessibleCache];
+383 }
+384 
+385 void QIOSWindow::requestUpdate()
+386 {
+387     static_cast<QIOSScreen *>(screen())->setUpdatesPaused(false);
+388 }
+389 
+390 CAEAGLLayer *QIOSWindow::eaglLayer() const
+391 {
+392     Q_ASSERT([m_view.layer isKindOfClass:[CAEAGLLayer class]]);
+393     return static_cast<CAEAGLLayer *>(m_view.layer);
+394 }
+395 
+396 #ifndef QT_NO_DEBUG_STREAM
+397 QDebug operator<<(QDebug debug, const QIOSWindow *window)
+398 {
+399     QDebugStateSaver saver(debug);
+400     debug.nospace();
+401     debug << "QIOSWindow(" << (const void *)window;
+402     if (window)
+403         debug << ", window=" << window->window();
+404     debug << ')';
+405     return debug;
+406 }
+407 #endif // !QT_NO_DEBUG_STREAM
+408 
+409 #include "moc_qioswindow.cpp"
+410 
+411 QT_END_NAMESPACE

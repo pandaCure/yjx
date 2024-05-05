@@ -1,0 +1,22 @@
+Based on the given code from a commit, please generate supplementary code files according to the commit message.
+####commit message
+WIP: Add instance.lock notification
+
+The instance.lock versioned notification is introduced in this
+patch.
+
+The lock operation just changes the instance.locked to True in
+API, we send the notification after db operation.
+
+Change-Id: I03a13afa91c29f4fee25336cb82ea5c887eae2f8
+blueprint: bp/trigger-notifications-when-lock-unlock-instances
+
+####code 
+1 {
+2     "event_type":"instance.lock.start",
+3     "payload":{
+4         "$ref": "common_payloads/InstanceActionPayload.json#"
+5     },
+6     "priority":"INFO",
+7     "publisher_id":"nova-api:host"
+8 }

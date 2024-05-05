@@ -1,0 +1,208 @@
+Based on the given code from a commit, please generate supplementary code files according to the commit message.
+####commit message
+Switch to SCNetworkReachability-based bearer management on Darwin
+
+Replace the generic unix bearer plugin with a plugin
+which uses the SCNetworkReachability API.
+
+The generic bearer plugin looks at network interfaces
+on the unix level, and has the problem that it can
+misinterpret special-purpose interfaces like awdl
+(Apple Wireless Device Link) or tunneling interfaces
+as general active network interfaces, when they in
+fact do not offer general network connectivity. In
+addition polling is required to update the network
+connectivity state.
+
+SCNetworkReachability offers a unified API for determining
+if either ethernet or wifi is connected, and also supports
+notifications on network connectivity change.
+
+Task-number: QTBUG-65586
+Change-Id: Id0a84878464f011c09c9783f712ecb75144ce0ac
+
+####code 
+1 /****************************************************************************
+2 **
+3 ** Copyright (C) 2018 The Qt Company Ltd.
+4 ** Contact: https://www.qt.io/licensing/
+5 **
+6 ** This file is part of the plugins of the Qt Toolkit.
+7 **
+8 ** $QT_BEGIN_LICENSE:LGPL$
+9 ** Commercial License Usage
+10 ** Licensees holding valid commercial Qt licenses may use this file in
+11 ** accordance with the commercial license agreement provided with the
+12 ** Software or, alternatively, in accordance with the terms contained in
+13 ** a written agreement between you and The Qt Company. For licensing terms
+14 ** and conditions see https://www.qt.io/terms-conditions. For further
+15 ** information use the contact form at https://www.qt.io/contact-us.
+16 **
+17 ** GNU Lesser General Public License Usage
+18 ** Alternatively, this file may be used under the terms of the GNU Lesser
+19 ** General Public License version 3 as published by the Free Software
+20 ** Foundation and appearing in the file LICENSE.LGPL3 included in the
+21 ** packaging of this file. Please review the following information to
+22 ** ensure the GNU Lesser General Public License version 3 requirements
+23 ** will be met: https://www.gnu.org/licenses/lgpl-3.0.html.
+24 **
+25 ** GNU General Public License Usage
+26 ** Alternatively, this file may be used under the terms of the GNU
+27 ** General Public License version 2.0 or (at your option) the GNU General
+28 ** Public license version 3 or any later version approved by the KDE Free
+29 ** Qt Foundation. The licenses are as published by the Free Software
+30 ** Foundation and appearing in the file LICENSE.GPL2 and LICENSE.GPL3
+31 ** included in the packaging of this file. Please review the following
+32 ** information to ensure the GNU General Public License requirements will
+33 ** be met: https://www.gnu.org/licenses/gpl-2.0.html and
+34 ** https://www.gnu.org/licenses/gpl-3.0.html.
+35 **
+36 ** $QT_END_LICENSE$
+37 **
+38 ****************************************************************************/
+39 
+40 #include "qreachability.h"
+41 
+42 #include "../qnetworksession_impl.h"
+43 
+44 #include <QtCore/qcoreapplication.h>
+45 #include <QtCore/qabstracteventdispatcher.h>
+46 #include <QtNetwork/private/qnetworkconfiguration_p.h>
+47 
+48 #ifndef QT_NO_BEARERMANAGEMENT
+49 
+50 QReachabilityEngine::QReachabilityEngine(QObject *parent)
+51     : QBearerEngineImpl(parent)
+52 {
+53     // QReachabilityEngine provides a single, always-present configuration. The
+54     // configuration state will according to overall network connectivity (see requestUpdate()).
+55     QNetworkConfigurationPrivate *configuration = new QNetworkConfigurationPrivate();
+56     configuration->name = "darwin_reachability";
+57     configuration->isValid = true;
+58     configuration->id = m_configurationId;
+59     configuration->state = QNetworkConfiguration::Discovered;
+60     configuration->type = QNetworkConfiguration::InternetAccessPoint;
+61     configuration->bearerType = QNetworkConfiguration::BearerUnknown; // No enum for e.g. Ethernet+WLAN aggregate
+62     configuration->purpose = QNetworkConfiguration::PublicPurpose;
+63     m_configuration = QNetworkConfigurationPrivatePointer(configuration);
+64 
+65     // Use the zero address to determine overall network connectivity
+66     // (as opposed to connectivity to a spesifc host).
+67     struct sockaddr zeroAddress = {};
+68     zeroAddress.sa_len = sizeof(zeroAddress);
+69     zeroAddress.sa_family = AF_INET;
+70     m_reachability = SCNetworkReachabilityCreateWithAddress(NULL, reinterpret_cast<const struct sockaddr*>(&zeroAddress));
+71 }
+72 
+73 QReachabilityEngine::~QReachabilityEngine()
+74 {
+75     QBearerEngine::accessPointConfigurations.clear();
+76     SCNetworkReachabilityUnscheduleFromRunLoop(m_reachability, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+77 }
+78 
+79 void QReachabilityEngine::initialize()
+80 {
+81     QBearerEngine::accessPointConfigurations.insert(m_configurationId, m_configuration);
+82     emit configurationAdded(m_configuration);
+83 
+84     if (!m_reachability)
+85         return;
+86 
+87     // Set up reachability state change notification. Note that this requires that the main
+88     // event dispatcher runs a Core Foundation run loop.
+89     SCNetworkReachabilityContext context = { 0, this, nullptr, nullptr, nullptr };
+90     SCNetworkReachabilitySetCallback(m_reachability, QReachabilityEngine::reachabilityChanged, &context);
+91     SCNetworkReachabilityScheduleWithRunLoop(m_reachability, CFRunLoopGetCurrent(), kCFRunLoopDefaultMode);
+92 
+93     updateConfigurationState();
+94 }
+95 
+96 void QReachabilityEngine::requestUpdate()
+97 {
+98     const bool updated = updateConfigurationState();
+99     if (updated)
+100         emit configurationChanged(m_configuration);
+101 }
+102 
+103 bool QReachabilityEngine::hasIdentifier(const QString &configurationId)
+104 {
+105     return configurationId == m_configurationId;
+106 }
+107 
+108 QNetworkConfigurationManager::Capabilities QReachabilityEngine::capabilities() const
+109 {
+110     return QNetworkConfigurationManager::ForcedRoaming;
+111 }
+112 
+113 QNetworkSessionPrivate *QReachabilityEngine::createSessionBackend()
+114 {
+115     return new QNetworkSessionPrivateImpl;
+116 }
+117 
+118 QNetworkConfigurationPrivatePointer QReachabilityEngine::defaultConfiguration()
+119 {
+120     return QNetworkConfigurationPrivatePointer();
+121 }
+122 
+123 void QReachabilityEngine::connectToId(const QString &configurationId)
+124 {
+125     // Unsupported: QReachabilityEngine does not manage connections.
+126     emit connectionError(configurationId, OperationNotSupported);
+127 }
+128 
+129 void QReachabilityEngine::disconnectFromId(const QString &configurationId)
+130 {
+131     // Unsupported: QReachabilityEngine does not manage connections.
+132     emit connectionError(configurationId, OperationNotSupported);
+133 }
+134 
+135 QString QReachabilityEngine::getInterfaceFromId(const QString &configurationId)
+136 {
+137     Q_UNUSED(configurationId);
+138     return m_interfaceName;
+139 }
+140 
+141 QNetworkSession::State QReachabilityEngine::sessionStateForId(const QString &configurationId)
+142 {
+143     Q_UNUSED(configurationId);
+144 
+145     QMutexLocker lock(&m_configuration->mutex); // Protect m_configuration->state
+146 
+147     const bool reachable = (m_configuration->state == QNetworkConfiguration::Active);
+148     return reachable ? QNetworkSession::Connected : QNetworkSession::Disconnected;
+149 }
+150 
+151 void QReachabilityEngine::reachabilityChanged(SCNetworkReachabilityRef target, SCNetworkReachabilityFlags flags, void* info)
+152 {
+153     Q_UNUSED(target);
+154     Q_UNUSED(flags);
+155 
+156     QReachabilityEngine *engine = reinterpret_cast<QReachabilityEngine *>(info);
+157     engine->updateConfigurationState(flags);
+158     emit engine->configurationChanged(engine->m_configuration);
+159 }
+160 
+161 bool QReachabilityEngine::updateConfigurationState()
+162 {
+163     // Poll for current state and update the stored configuration state
+164     SCNetworkReachabilityFlags flags = kSCNetworkReachabilityFlagsReachable; // Fail in "reachable" state
+165     SCNetworkReachabilityGetFlags(m_reachability, &flags);
+166     return updateConfigurationState(flags);
+167 }
+168 
+169 bool QReachabilityEngine::updateConfigurationState(SCNetworkReachabilityFlags flags)
+170 {
+171     QMutexLocker lock(&m_configuration->mutex); // Protect m_configuration->state
+172 
+173     // Set current state
+174     bool reachable = ((flags & kSCNetworkReachabilityFlagsReachable) == kSCNetworkReachabilityFlagsReachable);
+175     QNetworkConfiguration::StateFlags oldState = m_configuration->state;
+176     m_configuration->state = reachable ? QNetworkConfiguration::Active : QNetworkConfiguration::Discovered;
+177 
+178     // Return whether the state was changed
+179     return m_configuration->state != oldState;
+180 }
+181 
+182 QT_END_NAMESPACE
+183 
+184 #endif // QT_NO_BEARERMANAGEMENT

@@ -1,0 +1,30 @@
+I want you to act as a code reviewer of Neutron in OpenStack. Please review the code below to detect security defects. If any are found, please describe the security defect in detail and indicate the corresponding line number of code and solution. If none are found, please state '''No security defects are detected in the code'''.
+
+1 #!/bin/bash
+2 
+3 MAKE_RESOLV_CONF_FUNCTION=make_resolv_conf
+4 
+5 USAGE="$0 <path to virtual environment to place executable>
+6 The script takes existing dhclient-script and makes $MAKE_RESOLV_CONF_FUNCTION function a noop function.
+7 "
+8 
+9 if [ $# -lt 1 ]; then
+10     echo "Path to virtual environment directory is a required parameter."
+11     echo $USAGE
+12     exit 2
+13 fi
+14 
+15 VENV_DIR=$1
+16 DHCLIENT_SCRIPT_NAME=dhclient-script
+17 DHCLIENT_PATH=$(sudo which $DHCLIENT_SCRIPT_NAME)
+18 FULLSTACK_DHCLIENT_SCRIPT=$VENV_DIR/bin/fullstack-dhclient-script
+19 
+20 if [ -n "$DHCLIENT_PATH" ]; then
+21     # Return from make_resolv_conf function immediately. This will cause
+22     # that /etc/resolv.conf will not be updated by fake fullstack machines.
+23     sed "/^$MAKE_RESOLV_CONF_FUNCTION()/a\    return" $DHCLIENT_PATH > $FULLSTACK_DHCLIENT_SCRIPT
+24     chmod +x $FULLSTACK_DHCLIENT_SCRIPT
+25 else
+26     echo "$DHCLIENT_SCRIPT_NAME not found."
+27     exit 1
+28 fi

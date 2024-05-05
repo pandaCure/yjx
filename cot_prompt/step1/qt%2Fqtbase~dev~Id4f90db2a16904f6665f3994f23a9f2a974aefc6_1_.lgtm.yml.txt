@@ -1,0 +1,47 @@
+Based on the given code from a commit, please generate supplementary code files according to the commit message.
+####commit message
+Skip LGTM analysis for the bootstrap library and tools.
+
+This is because the same code is built for the bootstrap library with
+non-standard options like disabled threads, which causes false alerts.
+So we build the bootstrap tools in the "configure" step.
+
+Additionally we update the configure flags to only the ones that
+matter for the CMake build, after the latest configure script updates.
+
+Change-Id: Id4f90db2a16904f6665f3994f23a9f2a974aefc6
+
+####code 
+1 extraction:
+2   cpp:
+3     prepare:
+4       packages:
+5         - libgl-dev
+6         - libglu-dev
+7         - libpcre2-dev
+8         - libz-dev
+9         - libfreetype6-dev
+10         - libpng-dev
+11         - libjpeg-dev
+12         - libsqlite3-dev
+13     after_prepare:
+14       - mkdir $HOME/cmake-3.17 \
+15           \ && wget -qO- "https://cmake.org/files/v3.17/cmake-3.17.3-Linux-x86_64.tar.gz" \
+16             \ | tar -xzf - --strip-components=1 -C $HOME/cmake-3.17
+17       - export PATH=$HOME/cmake-3.17/bin:$PATH
+18 
+19     # Pre-analysis step.
+20     configure:
+21       command:
+22         - "./configure -cmake -opensource -confirm-license -debug -no-pch \
+23           \ -nomake tests -nomake examples -no-harfbuzz \
+24           \ -system-pcre -system-zlib -system-freetype -system-libpng \
+25           \ -system-libjpeg -system-sqlite"
+26         # We skip analyzing the bootstrap library, since the same code is
+27         # built with non-standard flags and false-positives are flagged.
+28         - ninja bootstrap_tools
+29 
+30     # Actual analysis.
+31     index:
+32       build_command:
+33         - ninja

@@ -1,0 +1,147 @@
+Please review the code below for security defects using the CWE (Common Weakness Enumeration) as a reference standard. If any are found, please describe the security defect in detail and indicate the corresponding line number of code and solution. If none are detected, state: 'No security defects are detected in the code'.
+
+1 .. _config-qos-min-bw:
+2 
+3 Quality of Service (QoS): Guaranteed Bandwidth
+4 ==============================================
+5 
+6 Most Networking Quality of Service (QoS) features are implemented by solely
+7 OpenStack Neutron and they are already documented in the
+8 `QoS configuration chapter of the Networking Guide <config-qos.html>`_
+9 Some more complex QoS features necessarily involve the scheduling of a cloud
+10 server, therefore their implementation is shared between OpenStack Nova,
+11 Neutron and Placement. As of the OpenStack Stein release the Guaranteed
+12 Minimum Bandwidth feature is like the latter.
+13 
+14 This Networking Guide chapter does not aim to replace Nova or Placement
+15 documentation in any way, but it still hopes to give an overall OpenStack-level guide to
+16 understanding and configuring a deployment to use the Guaranteed Minimum
+17 Bandwidth feature.
+18 
+19 A guarantees of minimum available bandwidth can be enforced on two levels:
+20 
+21 * Scheduling a server on a compute host where the bandwidth is available.
+22   To be more precise: Scheduling a server's port on a compute host's physical
+23   network interface where the bandwidth is available.
+24 * Queueing network packets on a physical network interface to provide the
+25   guaranteed bandwidth.
+26 
+27 In short the enforcement has two levels: placement and data plane.
+28 Since the data plane enforcement is already documented in the
+29 `QoS chapter <config-qos.html>`_
+30 here we only document the placement-level enforcement.
+31 
+32 Limitations
+33 -----------
+34 
+35 * The Guaranteed Minimum Bandwidth feature is not complete in the Stein
+36   release. Not all Nova server lifecycle operations can be executed on a
+37   server with bandwidth guarantees. In Stein you can boot and delete a server
+38   with a guarantee and detach ports with a guarantee FIXME grammar (Nova API microversion 2.70). Support for server migrate,
+39   resize, evacuate, live-migrate, unshelve after shelve-offload is to be implemented later.
+40 
+41 * If you mix ports with and without bandwidth guarantees on the same physical
+42   interface then the ports without a gaurantee may starve. Therefore mixing
+43   them is not recommended. Instead it is recommended to separate them by nova
+44   host aggregates. FIXME link to host aggregate guide
+45 
+46 * Bandwidth guarantees for ports can only be requested on networks backed by
+47   physnets.
+48 
+49 * The first data-plane-only Guaranteed Minimum Bandwidth implementation (for
+50   SR-IOV egress traffic) was released in the Newton release of Neutron.
+51   Because of the known lack of placement-level enforcement it was marked as
+52   "best effort". FIXME link Since placement-level enforcement was not in place bandwidth may have
+53   become overallocated and the system level resource inventory may have become
+54   inconsistent. Therefore for users of the data-plane-only implementation a
+55   migration process is mandatory (FIXME see the migration section below) to
+56   bring the system level resource inventory to a consistent state. Further
+57   operations that would reintroduce inconsistency (e.g. migrating a server
+58   with minimum_bandwidth QoS rule, but no resource allocation in Placement)
+59   are rejected now in a backward-incompatible way.
+60 
+61 * In Stein there is no support for networks with multiple physnets. Networks
+62   with multiple segments all having the same physnet name are expected to work
+63   though. FIXME discuss multi segment networks where one is a vlan segment and
+64   the rest are tunneled segments and that's why they don't have physnets
+65 
+66 * Changing the guarantee of a QoS policy (adding/deleting a minimum_bandwidth
+67   rule, or changing the min_kbps field of a minimum_bandwidth rule) is only
+68   possible until the policy is not in effect. That is ports of the QoS policy
+69   are not yet used by Nova. Requests to change guarantees of in-effect
+70   policies are rejected.
+71 
+72 * FIXME cannot use network in nova boot, must use port instead
+73 * FIXME the same for attach
+74 
+75 Placement pre-requisites
+76 
+77 microversion 1.29 FIXME link
+78 and this was release first in FIXME
+79 https://docs.openstack.org/nova/latest/reference/api-microversion-history.html
+80 
+81 standalone or not placement
+82 
+83 Nova pre-requisites
+84 
+85 microversion 2.70 FIXME link
+86 and this was releases first in Stein
+87 
+88 Nova config
+89 14:57:21 < gibi> rubasov: "The currently unsupported case is when a single compute node has"
+90 14:57:21 < gibi> whitelisted VFs from more than one PFs which are connected to the same
+91 14:57:21 < gibi> physnet. This two PFs can have totally different bandwidth inventories
+92 https://review.openstack.org/#/c/625311/25
+93 https://review.openstack.org/#/c/623543
+94 
+95 Neutron pre-requisites
+96 
+97 extensions
+98 qos-bw-minimum-ingress
+99 port-resource-request
+100 agent-resources-synced
+101 
+102 Neutron config
+103 
+104 service_plugins
+105 
+106 [placement]
+107 
+108 ovs and sr-iov resource_provider_bandwidths and
+109 resource_provider_inventory_defaults
+110 blacklist_vnic_types
+111 
+112 Propagation of resource information
+113 agent -> server -> placement
+114 
+115 agent -> server
+116 config
+117 heartbeat
+118 
+119 server -> placement
+120 via rest api
+121 on demand
+122 agent resources_synced
+123 ability to recover from transient errors
+124 triggers of sync
+125 new agent record in db
+126 agent start flag, restart of agent
+127 heartbeat + non-successful last sync
+128 resync with and without agent restart
+129 neutron-server restart does not trigger resync
+130 
+131 neutron agents
+132 supported ovs and sr-iov
+133 
+134 sample usage
+135 setup by admin
+136 usage by ordinary user
+137 
+138 migration that is heal allocation
+139 
+140 debugging
+141 agent's resources_synced
+142 port's resource_request
+143 port's binding:profile.allocation
+144 allocation records in placement
+145 consumer_id is the server's uuid

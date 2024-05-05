@@ -1,0 +1,174 @@
+I want you to act as a code reviewer of Qt Base in Qt. Please review the code below to detect security defects. If any are found, please describe the security defect in detail and indicate the corresponding line number of code and solution. If none are found, please state '''No security defects are detected in the code'''.
+
+1 /****************************************************************************
+2 **
+3 ** Copyright (C) 2016 Samuel Gaist <samuel.gaist@edeltech.ch>
+4 ** Contact: http://www.qt.io/licensing/
+5 **
+6 ** This file is part of the QtNotifications plugins of the Qt Toolkit.
+7 **
+8 ** $QT_BEGIN_LICENSE:LGPL$
+9 ** Commercial License Usage
+10 ** Licensees holding valid commercial Qt licenses may use this file in
+11 ** accordance with the commercial license agreement provided with the
+12 ** Software or, alternatively, in accordance with the terms contained in
+13 ** a written agreement between you and The Qt Company. For licensing terms
+14 ** and conditions see https://www.qt.io/terms-conditions. For further
+15 ** information use the contact form at https://www.qt.io/contact-us.
+16 **
+17 ** GNU Lesser General Public License Usage
+18 ** Alternatively, this file may be used under the terms of the GNU Lesser
+19 ** General Public License version 3 as published by the Free Software
+20 ** Foundation and appearing in the file LICENSE.LGPL3 included in the
+21 ** packaging of this file. Please review the following information to
+22 ** ensure the GNU Lesser General Public License version 3 requirements
+23 ** will be met: https://www.gnu.org/licenses/lgpl-3.0.html.
+24 **
+25 ** GNU General Public License Usage
+26 ** Alternatively, this file may be used under the terms of the GNU
+27 ** General Public License version 2.0 or (at your option) the GNU General
+28 ** Public license version 3 or any later version approved by the KDE Free
+29 ** Qt Foundation. The licenses are as published by the Free Software
+30 ** Foundation and appearing in the file LICENSE.GPL2 and LICENSE.GPL3
+31 ** included in the packaging of this file. Please review the following
+32 ** information to ensure the GNU General Public License requirements will
+33 ** be met: https://www.gnu.org/licenses/gpl-2.0.html and
+34 ** https://www.gnu.org/licenses/gpl-3.0.html.
+35 **
+36 ** $QT_END_LICENSE$
+37 **
+38 ****************************************************************************/
+39 
+40 #include "qcocoanotifier.h"
+41 
+42 #include <QtNotifications/qnotification.h>
+43 
+44 #include <QtCore/qsysinfo.h>
+45 
+46 #include "private/qcocoahelpers_p.h"
+47 
+48 #import <AppKit/AppKit.h>
+49 
+50 #ifndef QT_NO_NOTIFIER
+51 
+52 QT_USE_NAMESPACE
+53 
+54 /*!
+55     \since 5.8
+56     \class QCocoaNotifier
+57     \brief Cocoa notification implementation
+58 
+59     Handles cocoa notification sending.
+60 
+61     \warning Requires macOS 10.8 at least
+62 
+63     \warning Requires an Info.plist file that contains the application CFBundleIdentifier
+64 
+65     \ingroup qt-notifications
+66 */
+67 
+68 @interface QT_MANGLE_NAMESPACE(QNSUserNotificationCenterDelegate) : NSObject
+69     <NSUserNotificationCenterDelegate>
+70     {
+71 @public
+72     QCocoaNotifier *notifier;
+73     int called;
+74 }
+75 -(id)initWithNotifier:(QCocoaNotifier *)notifier;
+76 - (BOOL)userNotificationCenter:(NSUserNotificationCenter *)center shouldPresentNotification:(NSUserNotification *)notification;
+77 - (void)userNotificationCenter:(NSUserNotificationCenter *)center didActivateNotification:(NSUserNotification *)notification;
+78 @end
+79 
+80 
+81 QT_NAMESPACE_ALIAS_OBJC_CLASS(QNSUserNotificationCenterDelegate);
+82 
+83 QT_BEGIN_NAMESPACE
+84 class QCocoaSystemNotifier
+85 {
+86 public:
+87     QCocoaSystemNotifier(QCocoaNotifier *notifier) {
+88         delegate = [[QNSUserNotificationCenterDelegate alloc] initWithNotifier:notifier];
+89         [[NSUserNotificationCenter defaultUserNotificationCenter] setDelegate:delegate];
+90     }
+91     ~QCocoaSystemNotifier() {
+92         [[NSUserNotificationCenter defaultUserNotificationCenter] setDelegate:nil];
+93         [delegate release];
+94     }
+95 
+96     QNSUserNotificationCenterDelegate *delegate;
+97 };
+98 
+99 
+100 QCocoaNotifier::QCocoaNotifier() :
+101     QAbstractNotifier(),
+102     _systemNotifier(new QCocoaSystemNotifier(this))
+103 {
+104 }
+105 
+106 QCocoaNotifier::~QCocoaNotifier()
+107 {
+108 }
+109 
+110 void QCocoaNotifier::notify(const QNotification& notification)
+111 {
+112     NSUserNotification *userNotification = [[NSUserNotification alloc] init];
+113     userNotification.title = notification.title().toNSString();
+114     userNotification.informativeText = notification.message().toNSString();
+115     userNotification.soundName = NSUserNotificationDefaultSoundName;
+116 
+117     if (QSysInfo::MacintoshVersion >= QSysInfo::MV_10_9) {
+118         userNotification.actionButtonTitle = tr("Show").toNSString();
+119         QImage notificationIconImage = notification.icon();
+120         if (!notificationIconImage.isNull()) {
+121             CGImageRef cgImage = qt_mac_toCGImage(notificationIconImage);
+122             userNotification.contentImage = qt_mac_cgimage_to_nsimage(cgImage);
+123             CGImageRelease(cgImage);
+124         }
+125     }
+126 
+127     QDateTime deliveryDateTime = notification.deliveryDateTime();
+128     if (deliveryDateTime.isValid()) {
+129         userNotification.deliveryDate = deliveryDateTime.toNSDate();
+130         [[NSUserNotificationCenter defaultUserNotificationCenter] scheduleNotification:userNotification];
+131     } else {
+132         [[NSUserNotificationCenter defaultUserNotificationCenter] deliverNotification:userNotification];
+133     }
+134 }
+135 
+136 QAbstractNotifier::AvailableCapabilities QCocoaNotifier::capabilities() const
+137 {
+138     return QAbstractNotifier::Default | QAbstractNotifier::CanSchedule | QAbstractNotifier::ShowIcon;
+139 }
+140 
+141 @implementation QNSUserNotificationCenterDelegate
+142 - (id)init
+143 {
+144     self = [super init];
+145     called = 0;
+146     return self;
+147 }
+148 -(id)initWithNotifier:(QCocoaNotifier *)cocoaNotifier
+149 {
+150     self = [super init];
+151     if (self) {
+152         notifier = cocoaNotifier;
+153     }
+154     return self;
+155 }
+156 
+157 - (BOOL)userNotificationCenter:(NSUserNotificationCenter *)center shouldPresentNotification:(NSUserNotification *)notification {
+158     Q_UNUSED(center);
+159     Q_UNUSED(notification);
+160     called++;
+161     return YES;
+162 }
+163 - (void)userNotificationCenter:(NSUserNotificationCenter *)center didActivateNotification:(NSUserNotification *)notification {
+164     Q_UNUSED(center);
+165     Q_UNUSED(notification);
+166     emit notifier->messageClicked();
+167 }
+168 @end
+169 
+170 QT_END_NAMESPACE
+171 
+172 #endif // QT_NO_NOTIFIER
